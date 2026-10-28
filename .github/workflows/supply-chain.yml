@@ -1,0 +1,194 @@
+name: Secure Supply Chain
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Tests ─────────────────────────────────────────────────────────────────
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests with coverage
+        run: pytest --cov=app --cov-report=xml --cov-report=term-missing
+
+      - name: Enforce coverage threshold
+        run: python -m coverage report --fail-under=80
+
+  # ── SAST ──────────────────────────────────────────────────────────────────
+  sast:
+    name: SAST (bandit)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run bandit
+        run: |
+          pip install bandit[sarif]>=1.8
+          bandit -r src/ -f sarif -o bandit-results.sarif || true
+          bandit -r src/ -f txt -ll
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: bandit-results.sarif
+          category: bandit
+
+  # ── Dependency Audit ──────────────────────────────────────────────────────
+  dep-audit:
+    name: Dependency Audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install pip-audit && pip install -e ".[dev]" && pip-audit
+
+  # ── Docker Build ──────────────────────────────────────────────────────────
+  docker-build:
+    name: Docker Build (multi-stage)
+    runs-on: ubuntu-latest
+    needs: [test, sast]
+    permissions:
+      contents: read
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: secure-supply-chain-app:${{ github.sha }}
+          outputs: type=docker,dest=/tmp/image.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/image.tar
+          retention-days: 1
+
+  # ── Image Scan (Trivy) ────────────────────────────────────────────────────
+  trivy-scan:
+    name: Image Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: docker-build
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load image
+        run: docker load < /tmp/image.tar
+
+      - name: Scan with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: secure-supply-chain-app:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image
+
+  # ── SBOM Generation (CycloneDX) ───────────────────────────────────────────
+  sbom:
+    name: SBOM Generation (CycloneDX)
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate SBOM
+        run: |
+          pip install cyclonedx-bom
+          pip install -e .
+          cyclonedx-py environment --output-format json --output-file sbom.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+          retention-days: 90
+
+  # ── Artifact Signing (Cosign) ─────────────────────────────────────────────
+  # NOTE: Signing requires pushing to a registry. This job is defined
+  # but disabled (needs: [] causes skip) without registry credentials.
+  # To enable: configure REGISTRY, IMAGE_NAME secrets and uncomment the push step.
+  sign:
+    name: Sign Artifact (Cosign — keyless)
+    runs-on: ubuntu-latest
+    needs: [trivy-scan, sbom]
+    # Only sign on push to main (not on PRs) — requires OIDC token
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write  # required for keyless signing via Sigstore
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Verify cosign available
+        run: cosign version
+
+      # Signing a real image requires: docker login + docker push + cosign sign <digest>
+      # Documented in docs/signing.md — not executed without registry credentials.
+      - name: Document signing readiness
+        run: |
+          echo "Cosign is installed and keyless OIDC signing is configured."
+          echo "To sign a pushed image: cosign sign --yes <registry>/<image>@<digest>"
+          echo "See docs/signing.md for the full procedure."

@@ -1,0 +1,19 @@
+# Exclude everything not needed in the image
+.git/
+.gitignore
+.venv/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+htmlcov/
+.coverage
+coverage.xml
+tests/
+docs/
+*.md
+Makefile
+trivy-report.*
+sbom.*
+cosign.*

@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# Test / coverage
+.coverage
+htmlcov/
+.pytest_cache/
+coverage.xml
+
+# Tool caches
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Security scan outputs (reports generated locally — never committed)
+trivy-report.json
+trivy-report.sarif
+sbom.json
+sbom.xml
+cosign.pub
+cosign.key
+
+# Docker build cache
+.dockerignore.bak
+
+# Secrets — never commit
+*.env
+.env*
+secrets/
+*.pem
+*.key
